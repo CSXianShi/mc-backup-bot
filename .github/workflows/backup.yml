@@ -1,0 +1,86 @@
+name: Minecraft Backup to Google Drive
+
+# 每 5 天在 UTC 18:00 运行（约北京时间次日 02:00）。也可在 Actions 页面手动触发。
+on:
+  schedule:
+    - cron: "0 18 */5 * *"
+  workflow_dispatch: {}
+
+env:
+  PANEL_URL: https://panel.rainbowc.cn
+  SERVER_ID: "7c352519"
+  GDRIVE_DIR: "gdrive:mc-backups"   # 备份在 Google Drive 中的存放目录
+  KEEP: 6                            # Google Drive 上保留的份数
+  PANEL_KEEP: 2                     # 面板节点上保留的份数（上限 3，留点余量）
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: 安装 rclone
+        run: |
+          curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o rclone.zip
+          unzip -q rclone.zip
+          sudo cp rclone-*-linux-amd64/rclone /usr/local/bin/
+          sudo chmod +x /usr/local/bin/rclone
+          rclone version
+
+      - name: 写入 rclone 配置
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONF_B64 }}" | base64 -d > ~/.config/rclone/rclone.conf
+          echo "remotes:"; rclone listremotes
+
+      - name: 从服务器(SFTP)拉取文件
+        run: |
+          mkdir -p srv
+          # 整个服务器；排除明显的临时/缓存目录以节省空间
+          rclone copy mcserver: ./srv \
+            --transfers=8 --checkers=16 --sftp-host ftp.ragame.top \
+            --exclude "cache/**" --exclude ".cache/**" --exclude "logs/**" \
+            --stats=30s --stats-one-line
+          echo "拉取完成，大小："; du -sh srv
+
+      - name: 打包
+        id: zip
+        run: |
+          NAME="backup-$(date -u +%Y-%m-%d-%H%M).zip"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          zip -r -q "$NAME" srv
+          ls -lh "$NAME"
+
+      - name: 上传到 Google Drive
+        run: |
+          rclone mkdir "${{ env.GDRIVE_DIR }}"
+          rclone copyto "${{ steps.zip.outputs.name }}" "${{ env.GDRIVE_DIR }}/${{ steps.zip.outputs.name }}" --stats-one-line
+
+      - name: 轮换 Google Drive 备份（只保留最新 N 份）
+        run: |
+          rclone lsf "${{ env.GDRIVE_DIR }}" --files-only \
+            | grep -E '^backup-.*\.zip$' | sort \
+            | head -n -${{ env.KEEP }} \
+            | while read -r f; do
+                echo "删除旧备份: $f"
+                rclone delete "${{ env.GDRIVE_DIR }}/$f"
+              done
+
+      - name: 轮换面板节点备份（删最旧的，腾出 3 份上限）
+        env:
+          KEY: ${{ secrets.PTERO_API_KEY }}
+        run: |
+          LIST=$(curl -sL "$PANEL_URL/api/client/servers/$SERVER_ID/backups" \
+            -H "Authorization: Bearer $KEY" -H "Accept: application/json")
+          echo "$LIST" | python3 -c "
+          import sys, json, subprocess, os
+          d = json.load(sys.stdin)
+          keep = int('${{ env.PANEL_KEEP }}')
+          bks = [b['attributes'] for b in d['data'] if b['attributes'].get('is_successful')]
+          bks.sort(key=lambda x: x['created_at'])
+          for b in bks[:-keep] if len(bks) > keep else []:
+              uuid = b['uuid']
+              print('删除面板旧备份:', b['name'])
+              subprocess.run(['curl','-sL','-X','DELETE',
+                f\"{os.environ['PANEL_URL']}/api/client/servers/{os.environ['SERVER_ID']}/backups/{uuid}\",
+                '-H', f\"Authorization: Bearer {os.environ['KEY']}\", '-H','Accept: application/json'])
+          "
