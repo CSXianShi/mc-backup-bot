@@ -10,7 +10,7 @@ env:
   PANEL_URL: https://panel.rainbowc.cn
   SERVER_ID: "7c352519"
   GDRIVE_DIR: "gdrive:mc-backups"
-  KEEP: "6"
+  KEEP: "100"
   PANEL_KEEP: "2"
 
 jobs:
