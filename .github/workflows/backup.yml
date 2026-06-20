@@ -35,11 +35,19 @@ jobs:
       - name: Pull server files via SFTP
         run: |
           mkdir -p srv
+          set +e
           rclone copy mcserver: ./srv \
-            --transfers=8 --checkers=16 \
+            --transfers=8 --checkers=16 --ignore-errors \
             --exclude "cache/**" --exclude ".cache/**" --exclude "logs/**" \
+            --exclude "plugins/spark/tmp/**" \
+            --exclude "**/*.tmp" --exclude "**/*.jfr" \
+            --exclude "**/*.partial" --exclude "**/session.lock" \
             --stats=30s --stats-one-line
+          rc=$?
+          set -e
+          echo "rclone exit code: $rc (live server may skip a few volatile files, that's ok)"
           du -sh srv
+          if [ ! -d srv/world ]; then echo "ERROR: world folder not pulled, aborting"; exit 1; fi
 
       - name: Zip
         id: zip
