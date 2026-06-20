@@ -1,9 +1,9 @@
 name: Minecraft Backup to Google Drive
 
-# Runs every 5 days at 18:00 UTC (~02:00 Beijing next day). Can also be run manually.
+# Runs daily at 18:00 UTC (~02:00 Beijing next day). Can also be run manually.
 on:
   schedule:
-    - cron: "0 18 */5 * *"
+    - cron: "0 18 * * *"
   workflow_dispatch: {}
 
 env:
