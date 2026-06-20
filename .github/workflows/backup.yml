@@ -1,6 +1,6 @@
 name: Minecraft Backup to Google Drive
 
-# 每 5 天在 UTC 18:00 运行（约北京时间次日 02:00）。也可在 Actions 页面手动触发。
+# Runs every 5 days at 18:00 UTC (~02:00 Beijing next day). Can also be run manually.
 on:
   schedule:
     - cron: "0 18 */5 * *"
@@ -9,16 +9,16 @@ on:
 env:
   PANEL_URL: https://panel.rainbowc.cn
   SERVER_ID: "7c352519"
-  GDRIVE_DIR: "gdrive:mc-backups"   # 备份在 Google Drive 中的存放目录
-  KEEP: 6                            # Google Drive 上保留的份数
-  PANEL_KEEP: 2                     # 面板节点上保留的份数（上限 3，留点余量）
+  GDRIVE_DIR: "gdrive:mc-backups"
+  KEEP: "6"
+  PANEL_KEEP: "2"
 
 jobs:
   backup:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: 安装 rclone
+      - name: Install rclone
         run: |
           curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o rclone.zip
           unzip -q rclone.zip
@@ -26,23 +26,22 @@ jobs:
           sudo chmod +x /usr/local/bin/rclone
           rclone version
 
-      - name: 写入 rclone 配置
+      - name: Write rclone config
         run: |
           mkdir -p ~/.config/rclone
           echo "${{ secrets.RCLONE_CONF_B64 }}" | base64 -d > ~/.config/rclone/rclone.conf
-          echo "remotes:"; rclone listremotes
+          rclone listremotes
 
-      - name: 从服务器(SFTP)拉取文件
+      - name: Pull server files via SFTP
         run: |
           mkdir -p srv
-          # 整个服务器；排除明显的临时/缓存目录以节省空间
           rclone copy mcserver: ./srv \
-            --transfers=8 --checkers=16 --sftp-host ftp.ragame.top \
+            --transfers=8 --checkers=16 \
             --exclude "cache/**" --exclude ".cache/**" --exclude "logs/**" \
             --stats=30s --stats-one-line
-          echo "拉取完成，大小："; du -sh srv
+          du -sh srv
 
-      - name: 打包
+      - name: Zip
         id: zip
         run: |
           NAME="backup-$(date -u +%Y-%m-%d-%H%M).zip"
@@ -50,37 +49,38 @@ jobs:
           zip -r -q "$NAME" srv
           ls -lh "$NAME"
 
-      - name: 上传到 Google Drive
+      - name: Upload to Google Drive
         run: |
           rclone mkdir "${{ env.GDRIVE_DIR }}"
           rclone copyto "${{ steps.zip.outputs.name }}" "${{ env.GDRIVE_DIR }}/${{ steps.zip.outputs.name }}" --stats-one-line
 
-      - name: 轮换 Google Drive 备份（只保留最新 N 份）
+      - name: Rotate Google Drive backups (keep newest N)
         run: |
           rclone lsf "${{ env.GDRIVE_DIR }}" --files-only \
             | grep -E '^backup-.*\.zip$' | sort \
             | head -n -${{ env.KEEP }} \
             | while read -r f; do
-                echo "删除旧备份: $f"
+                echo "deleting old backup: $f"
                 rclone delete "${{ env.GDRIVE_DIR }}/$f"
               done
 
-      - name: 轮换面板节点备份（删最旧的，腾出 3 份上限）
+      - name: Rotate panel node backups (free up the 3-slot limit)
         env:
           KEY: ${{ secrets.PTERO_API_KEY }}
+          PANEL_KEEP: ${{ env.PANEL_KEEP }}
         run: |
-          LIST=$(curl -sL "$PANEL_URL/api/client/servers/$SERVER_ID/backups" \
-            -H "Authorization: Bearer $KEY" -H "Accept: application/json")
-          echo "$LIST" | python3 -c "
+          curl -sL "$PANEL_URL/api/client/servers/$SERVER_ID/backups" \
+            -H "Authorization: Bearer $KEY" -H "Accept: application/json" \
+          | python3 -c "
           import sys, json, subprocess, os
           d = json.load(sys.stdin)
-          keep = int('${{ env.PANEL_KEEP }}')
+          keep = int(os.environ['PANEL_KEEP'])
           bks = [b['attributes'] for b in d['data'] if b['attributes'].get('is_successful')]
           bks.sort(key=lambda x: x['created_at'])
-          for b in bks[:-keep] if len(bks) > keep else []:
-              uuid = b['uuid']
-              print('删除面板旧备份:', b['name'])
+          extra = bks[:-keep] if len(bks) > keep else []
+          for b in extra:
+              print('deleting panel backup:', b['name'])
               subprocess.run(['curl','-sL','-X','DELETE',
-                f\"{os.environ['PANEL_URL']}/api/client/servers/{os.environ['SERVER_ID']}/backups/{uuid}\",
+                f\"{os.environ['PANEL_URL']}/api/client/servers/{os.environ['SERVER_ID']}/backups/{b['uuid']}\",
                 '-H', f\"Authorization: Bearer {os.environ['KEY']}\", '-H','Accept: application/json'])
           "
