@@ -36,8 +36,7 @@ jobs:
         run: |
           mkdir -p srv
           set +e
-          rclone copy mcserver: ./srv 
-            --sftp-port 23099 \\
+          rclone copy mcserver: ./srv --sftp-port 23068 \\
             --transfers=8 --checkers=16 --ignore-errors \
             --exclude "cache/**" --exclude ".cache/**" --exclude "logs/**" \
             --exclude "plugins/spark/tmp/**" \
