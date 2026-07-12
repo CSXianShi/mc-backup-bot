@@ -1,5 +1,6 @@
 name: Minecraft Backup to Google Drive
 
+# Runs daily at 18:00 UTC (~02:00 Beijing next day). Can also be run manually.
 on:
   schedule:
     - cron: "0 18 * * *"
@@ -31,32 +32,41 @@ jobs:
           echo "${{ secrets.RCLONE_CONF_B64 }}" | base64 -d > ~/.config/rclone/rclone.conf
           rclone listremotes
 
-      - name: Download newest panel backup
-        id: backup
-        env:
-          KEY: ${{ secrets.PTERO_API_KEY }}
+      - name: Pull server files via SFTP
         run: |
-          DOWNLOAD_URL=$(curl -fsSL "$PANEL_URL/api/client/servers/$SERVER_ID/backups" \
-            -H "Authorization: Bearer $KEY" -H "Accept: application/json" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); b=[x['attributes'] for x in d['data'] if x['attributes'].get('is_successful')]; b.sort(key=lambda x:x['created_at']); print(b[-1]['uuid'])" \
-            | xargs -I{} curl -fsSL "$PANEL_URL/api/client/servers/$SERVER_ID/backups/{}/download" \
-              -H "Authorization: Bearer $KEY" -H "Accept: application/json" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['attributes']['url'])")
-          NAME="backup-$(date -u +%Y-%m-%d-%H%M).tar.gz"
-          curl -fL --retry 3 --retry-delay 5 "$DOWNLOAD_URL" -o "$NAME"
-          test -s "$NAME"
+          mkdir -p srv
+          set +e
+          rclone copy mcserver: ./srv 
+            --sftp-port 23099 \\
+            --transfers=8 --checkers=16 --ignore-errors \
+            --exclude "cache/**" --exclude ".cache/**" --exclude "logs/**" \
+            --exclude "plugins/spark/tmp/**" \
+            --exclude "**/*.tmp" --exclude "**/*.jfr" \
+            --exclude "**/*.partial" --exclude "**/session.lock" \
+            --stats=30s --stats-one-line
+          rc=$?
+          set -e
+          echo "rclone exit code: $rc (live server may skip a few volatile files, that's ok)"
+          du -sh srv
+          if [ ! -d srv/world ]; then echo "ERROR: world folder not pulled, aborting"; exit 1; fi
+
+      - name: Zip
+        id: zip
+        run: |
+          NAME="backup-$(date -u +%Y-%m-%d-%H%M).zip"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          zip -r -q "$NAME" srv
           ls -lh "$NAME"
 
       - name: Upload to Google Drive
         run: |
           rclone mkdir "${{ env.GDRIVE_DIR }}"
-          rclone copyto "${{ steps.backup.outputs.name }}" "${{ env.GDRIVE_DIR }}/${{ steps.backup.outputs.name }}" --stats-one-line
+          rclone copyto "${{ steps.zip.outputs.name }}" "${{ env.GDRIVE_DIR }}/${{ steps.zip.outputs.name }}" --stats-one-line
 
       - name: Rotate Google Drive backups (keep newest N)
         run: |
           rclone lsf "${{ env.GDRIVE_DIR }}" --files-only \
-            | grep -E '^backup-.*\.(zip|tar\.gz)$' | sort \
+            | grep -E '^backup-.*\.zip$' | sort \
             | head -n -${{ env.KEEP }} \
             | while read -r f; do
                 echo "deleting old backup: $f"
