@@ -32,11 +32,34 @@ jobs:
           echo "${{ secrets.RCLONE_CONF_B64 }}" | base64 -d > ~/.config/rclone/rclone.conf
           rclone listremotes
 
+      - name: Resolve SFTP endpoint from panel (survives node migrations)
+        env:
+          KEY: ${{ secrets.PTERO_API_KEY }}
+        run: |
+          DETAILS=$(curl -sL "$PANEL_URL/api/client/servers/$SERVER_ID" \
+            -H "Authorization: Bearer $KEY" -H "Accept: application/json")
+          SFTP_HOST=$(echo "$DETAILS" | python3 -c "import sys,json; d=json.load(sys.stdin)['attributes']['sftp_details']; print(d.get('domain') or d['ip'])")
+          SFTP_PORT=$(echo "$DETAILS" | python3 -c "import sys,json; print(json.load(sys.stdin)['attributes']['sftp_details']['port'])")
+          echo "SFTP endpoint: $SFTP_HOST:$SFTP_PORT"
+          echo "SFTP_HOST=$SFTP_HOST" >> "$GITHUB_ENV"
+          echo "SFTP_PORT=$SFTP_PORT" >> "$GITHUB_ENV"
+
+      - name: Check SFTP auth (fail fast with a clear message)
+        run: |
+          if ! rclone lsd mcserver: --sftp-host "$SFTP_HOST" --sftp-port "$SFTP_PORT" \
+              --contimeout 30s --timeout 60s --low-level-retries 2 --retries 1 > /dev/null 2>&1; then
+            echo "::error::SFTP auth failed at $SFTP_HOST:$SFTP_PORT. The panel password stored in RCLONE_CONF_B64 is stale - regenerate the secret with the current panel password."
+            exit 1
+          fi
+          echo "SFTP auth OK"
+
       - name: Pull server files via SFTP
         run: |
           mkdir -p srv
           set +e
-          rclone copy mcserver: ./srv --sftp-port 23068 \\
+          rclone copy mcserver: ./srv \
+            --sftp-host "$SFTP_HOST" --sftp-port "$SFTP_PORT" \
+            --contimeout 30s --timeout 120s --low-level-retries 3 --retries 1 \
             --transfers=8 --checkers=16 --ignore-errors \
             --exclude "cache/**" --exclude ".cache/**" --exclude "logs/**" \
             --exclude "plugins/spark/tmp/**" \
